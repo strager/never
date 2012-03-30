@@ -1,5 +1,8 @@
 #!/usr/bin/env node
 
+var IS_NODE = false;
+var IS_SPACEPORT = true;
+
 var path = require('path');
 var fs = require('fs');
 
@@ -7,8 +10,10 @@ var watch = require('watch');
 var v8socket = require('v8-socket');
 
 var rootPath = process.argv[2] || '.';
+var port = Number(process.argv[3] || 5858);
+var host = process.argv[4] || '';
 
-var socket = v8socket.connect();
+var socket = v8socket.connect(port, host);
 
 var liveScripts = Object.create(null); // script path => script ID
 var changeQueue = [ ];
@@ -17,7 +22,7 @@ watch.watchTree(rootPath, {
     ignoreDotFiles: true
 }, function on_watchEvent(fileName, cur, prev) {
     if (typeof fileName === 'string') {
-        var filePath = path.resolve(rootPath, fileName);
+        var filePath = path.resolve(fileName);
         if (changeQueue.indexOf(filePath) < 0) {
             changeQueue.push(filePath);
         }
@@ -31,8 +36,15 @@ function collectLiveScripts() {
         data.forEach(function (scriptData) {
             if (scriptData['type'] === 'script' && scriptData['scriptType'] === 2) {
                 var name = scriptData['name'];
-                var id = scriptData['id'];
-                liveScripts[name] = id;
+                if (typeof name === 'string') {
+                    var id = scriptData['id'];
+
+                    if (IS_SPACEPORT) {
+                        name = path.basename(name);
+                    }
+
+                    liveScripts[name] = id;
+                }
             }
         });
     });
@@ -42,16 +54,24 @@ function updateScripts() {
     while (changeQueue.length) {
         var filePath = changeQueue.pop();
 
-        if (filePath in liveScripts) {
+        var scriptName = filePath;
+
+        if (IS_SPACEPORT) {
+            scriptName = path.basename(scriptName);
+        }
+
+        if (scriptName in liveScripts) {
             fs.readFile(filePath, 'utf8', function on_readFile(err, contents) {
                 if (err) throw err;
 
-                contents = '(function (exports, require, module, __filename, __dirname) { ' + contents + '\n});';
+                if (IS_NODE) {
+                    contents = '(function (exports, require, module, __filename, __dirname) { ' + contents + '\n});';
+                }
 
                 socket.request({
                     'command': 'changelive',
                     'arguments': {
-                        'script_id': liveScripts[filePath],
+                        'script_id': liveScripts[scriptName],
                         'new_source': contents
                     }
                 }, function on_response(err, data) {
