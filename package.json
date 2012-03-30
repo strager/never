@@ -1,0 +1,13 @@
+{
+    "author": "strager <strager.nds@gmail.com>",
+    "name": "never",
+    "description": "Live JS updates",
+    "version": "0.0.0",
+    "main": "bin/never",
+    "dependencies": {
+        "watch": "0.5.0"
+    },
+    "engines": {
+        "node": "0.6.x"
+    }
+}

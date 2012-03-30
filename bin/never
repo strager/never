@@ -1,0 +1,68 @@
+#!/usr/bin/env node
+
+var path = require('path');
+var fs = require('fs');
+
+var watch = require('watch');
+var v8socket = require('v8-socket');
+
+var rootPath = process.argv[2] || '.';
+
+var socket = v8socket.connect();
+
+var liveScripts = Object.create(null); // script path => script ID
+var changeQueue = [ ];
+
+watch.watchTree(rootPath, {
+    ignoreDotFiles: true
+}, function on_watchEvent(fileName, cur, prev) {
+    if (typeof fileName === 'string') {
+        var filePath = path.resolve(rootPath, fileName);
+        if (changeQueue.indexOf(filePath) < 0) {
+            changeQueue.push(filePath);
+        }
+    }
+});
+
+function collectLiveScripts() {
+    socket.request({ 'command': 'scripts' }, function on_response(err, data) {
+        if (err) throw err;
+
+        data.forEach(function (scriptData) {
+            if (scriptData['type'] === 'script' && scriptData['scriptType'] === 2) {
+                var name = scriptData['name'];
+                var id = scriptData['id'];
+                liveScripts[name] = id;
+            }
+        });
+    });
+}
+
+function updateScripts() {
+    while (changeQueue.length) {
+        var filePath = changeQueue.pop();
+
+        if (filePath in liveScripts) {
+            fs.readFile(filePath, 'utf8', function on_readFile(err, contents) {
+                if (err) throw err;
+
+                contents = '(function (exports, require, module, __filename, __dirname) { ' + contents + '\n});';
+
+                socket.request({
+                    'command': 'changelive',
+                    'arguments': {
+                        'script_id': liveScripts[filePath],
+                        'new_source': contents
+                    }
+                }, function on_response(err, data) {
+                    if (err) throw err;
+
+                    console.log(data);
+                });
+            });
+        }
+    }
+}
+
+setInterval(collectLiveScripts, 1000);
+setInterval(updateScripts, 1000);
