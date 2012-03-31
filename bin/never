@@ -4,7 +4,6 @@ var IS_NODE = true;
 var IS_SPACEPORT = false;
 
 var UPDATE_INTERVAL = 100;
-var COLLECT_INTERVAL = 1000;
 
 var path = require('path');
 var fs = require('fs');
