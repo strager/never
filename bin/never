@@ -1,137 +1,94 @@
 #!/usr/bin/env node
 
-var IS_NODE = true;
-var IS_SPACEPORT = false;
-
-var UPDATE_INTERVAL = 100;
-
 var path = require('path');
-var fs = require('fs');
-var util = require('util');
 
-var Q = require('q');
-var watch = require('watch');
+var optimist = require('optimist');
 var v8socket = require('v8-socket');
 
-var rootPath = process.argv[2] || '.';
-var port = Number(process.argv[3] || 5858);
-var host = process.argv[4] || '';
-
-var socket = v8socket.connect(port, host);
-
-var changeQueue = [ ];
-var changeTimeout = null;
-var updatePromise = Q.ref(null);
-
-watch.watchTree(rootPath, {
-    ignoreDotFiles: true
-}, function on_watchEvent(fileName, cur, prev) {
-    if (typeof fileName === 'string') {
-        var filePath = path.resolve(fileName);
-        if (changeQueue.indexOf(filePath) < 0) {
-            changeQueue.push(filePath);
-            queueUpdateScripts();
+var options = optimist(process.argv.slice(2))
+    .usage(
+        "$0 [options ...] script.js [script options ...]\n" +
+        "$0 [options ...] --directory project_directory/"
+    )
+    .options({
+        "directory": {
+            usage: "Watch a directory, instead of launching a Node.js script",
+            alias: "d",
+            type: 'boolean',
+            default: false
+        },
+        "port": {
+            describe: "The port of the V8 debugger server",
+            alias: "p",
+            type: 'number',
+            default: NaN
+        },
+        "host": {
+            describe: "The host (IP address) of the server",
+            alias: "h",
+            type: 'string',
+            default: 'localhost'
         }
-    }
-});
+    })
+    .demand(1);
 
-function collectLiveScripts() {
-    return Q.ncall(
-        socket.request,
-        socket,
-        { 'command': 'scripts' }
-    ).get(0).then(function (data) {
-        var scripts = Object.create(null);
+var argv = options.argv;
 
-        data.forEach(function (scriptData) {
-            if (scriptData['type'] === 'script'
-             && scriptData['scriptType'] === 2) {
-                var name = scriptData['name'];
-                if (typeof name === 'string') {
-                    var id = scriptData['id'];
+var watchPath;
+if (argv["directory"]) {
+    watchPath = path.resolve(argv._[0]);
+} else {
+    watchPath = process.cwd();
+}
 
-                    if (IS_SPACEPORT) {
-                        name = path.basename(name);
-                    }
+// NaN logic is because, eventually,
+// we will need to find an unused port.
+var port = isNaN(argv["port"]) ? 5858 : argv["port"];
 
-                    scripts[name] = id;
-                }
-            }
-        });
+var host = argv["host"];
 
-        return scripts;
+function run() {
+    console.log("Watching " + watchPath + " and pushing changes to v8://" + host + ":" + port);
+
+    var socket = v8socket.connect(port, host);
+
+    var watch = require('../lib/watch');
+    var update = require('../lib/update');
+    var queue = [ ];
+    watch(watchPath, queue, function on_watchUpdate(filePath) {
+        update.queueUpdateScripts(socket, queue);
     });
 }
 
-function updateScripts(filePaths) {
-    return Q.ncall(socket.pauseWith, socket, function (callback) {
-        // Debugger is paused in this function block,
-        // as to make updates atomic
+if (argv["directory"]) {
+    run();
+} else {
+    var child_process = require('child_process');
+    var child = child_process.spawn(
+        process.argv[0], // Node
+        [ '--debug=' + port ].concat(argv._)
+    );
 
-        collectLiveScripts().then(function (liveScripts) {
-            function readFileContents(filePath, scriptName) {
-            }
+    var childAlive = true;
 
-            function sendContentsToDebugger(scriptName, contents) {
-                if (IS_NODE) {
-                    contents = '(function (exports, require, module, __filename, __dirname) { ' + contents + '\n});';
-                }
-
-                return Q.ncall(socket.request, socket, {
-                    'command': 'changelive',
-                    'arguments': {
-                        'script_id': liveScripts[scriptName],
-                        'new_source': contents
-                    }
-                });
-            }
-
-            function updateScript(filePath) {
-                var scriptName = filePath;
-                if (IS_SPACEPORT) {
-                    scriptName = path.basename(filePath);
-                }
-
-                if (!(scriptName in liveScripts)) {
-                    return null;
-                }
-
-                console.log("Updating script " + filePath);
-
-                return Q.ncall(fs.readFile, fs, filePath).then(function (contents) {
-                    return sendContentsToDebugger(scriptName, contents);
-                }).fail(function (err) {
-                    // Add some debugging information to errors
-                    err.scriptName = scriptName;
-                    err.filePath = filePath;
-                    throw err;
-                });
-            }
-
-            return Q.all(filePaths.map(updateScript));
-        }).then(function (_) {
-            callback(null);
-        }, function (err) {
-            callback(err);
-        });
-
-        // end debugger stopped
+    child.stdin.pipe(process.stdin);
+    child.stdout.pipe(process.stdout);
+    child.on('exit', function on_exit(code) {
+        childAlive = false;
+        process.exit(code);
     });
-}
 
-function queueUpdateScripts() {
-    if (changeTimeout !== null) {
-        clearTimeout(changeTimeout);
-    }
-
-    changeTimeout = setTimeout(function () {
-        updatePromise = updatePromise.then(function () {
-            // Remove all files from queue and update them
-            var filePaths = changeQueue.splice(0, changeQueue.length);
-            updateScripts(filePaths).end();
-        }).fail(function (err) {
-            console.error(err);
-            // Eat error
+    [ 'SIGINT' ].forEach(function (signal) {
+        process.on(signal, function on_signal() {
+            child.kill(signal);
         });
-    }, UPDATE_INTERVAL);
+    });
+
+    process.on('exit', function on_exit() {
+        if (childAlive) {
+            child.kill();
+        }
+    });
+
+    setTimeout(run, 1000);
 }
