@@ -6,8 +6,8 @@ var server = http.createServer(function on_request(req, res) {
     });
 
     res.end(
-        // Edit this text!
-        "Hello, world!"
+        // Edit me!
+        "Hello, world!\n"
     );
 });
 

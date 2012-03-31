@@ -1,11 +1,16 @@
 #!/usr/bin/env node
 
-var IS_NODE = false;
-var IS_SPACEPORT = true;
+var IS_NODE = true;
+var IS_SPACEPORT = false;
+
+var UPDATE_INTERVAL = 100;
+var COLLECT_INTERVAL = 1000;
 
 var path = require('path');
 var fs = require('fs');
+var util = require('util');
 
+var Q = require('q');
 var watch = require('watch');
 var v8socket = require('v8-socket');
 
@@ -18,6 +23,9 @@ var socket = v8socket.connect(port, host);
 var liveScripts = Object.create(null); // script path => script ID
 var changeQueue = [ ];
 
+var changeTimeout = null;
+var updatePromise = Q.ref(null);
+
 watch.watchTree(rootPath, {
     ignoreDotFiles: true
 }, function on_watchEvent(fileName, cur, prev) {
@@ -25,16 +33,22 @@ watch.watchTree(rootPath, {
         var filePath = path.resolve(fileName);
         if (changeQueue.indexOf(filePath) < 0) {
             changeQueue.push(filePath);
+            queueUpdateScripts();
         }
     }
 });
 
 function collectLiveScripts() {
-    socket.request({ 'command': 'scripts' }, function on_response(err, data) {
-        if (err) throw err;
+    return Q.ncall(
+        socket.request,
+        socket,
+        { 'command': 'scripts' }
+    ).then(function (data) {
+        var scripts = Object.create(null);
 
         data.forEach(function (scriptData) {
-            if (scriptData['type'] === 'script' && scriptData['scriptType'] === 2) {
+            if (scriptData['type'] === 'script'
+             && scriptData['scriptType'] === 2) {
                 var name = scriptData['name'];
                 if (typeof name === 'string') {
                     var id = scriptData['id'];
@@ -43,46 +57,76 @@ function collectLiveScripts() {
                         name = path.basename(name);
                     }
 
-                    liveScripts[name] = id;
+                    scripts[name] = id;
                 }
             }
         });
+
+        return scripts;
     });
 }
 
-function updateScripts() {
-    while (changeQueue.length) {
-        var filePath = changeQueue.pop();
-
-        var scriptName = filePath;
-
+function updateScripts(filePaths) {
+    var scriptNames = filePaths.map(function (filePath) {
         if (IS_SPACEPORT) {
-            scriptName = path.basename(scriptName);
+            return path.basename(filePath);
+        } else {
+            return filePath;
         }
+    });
 
-        if (scriptName in liveScripts) {
-            fs.readFile(filePath, 'utf8', function on_readFile(err, contents) {
-                if (err) throw err;
+    return Q.all(filePaths.map(function (filePath, i) {
+        // Collect contents of each changed script
 
-                if (IS_NODE) {
-                    contents = '(function (exports, require, module, __filename, __dirname) { ' + contents + '\n});';
+        if (scriptNames[i] in liveScripts) {
+            return Q.ncall(fs.readFile, fs, filePath);
+        } else {
+            return null;
+        }
+    })).then(function (contentss) {
+        // Send changes to debugger
+
+        return Q.all(contentss.map(function (contents, i) {
+            var scriptName = scriptNames[i];
+
+            if (IS_NODE) {
+                contents = '(function (exports, require, module, __filename, __dirname) { ' + contents + '\n});';
+            }
+
+            return Q.ncall(socket.request, socket, {
+                'command': 'changelive',
+                'arguments': {
+                    'script_id': liveScripts[scriptName],
+                    'new_source': contents
                 }
-
-                socket.request({
-                    'command': 'changelive',
-                    'arguments': {
-                        'script_id': liveScripts[scriptName],
-                        'new_source': contents
-                    }
-                }, function on_response(err, data) {
-                    if (err) throw err;
-
-                    console.log(data);
-                });
             });
-        }
-    }
+        }));
+    }).then(function (responses) {
+        // Profit!
+
+        return null; // Hide responses
+    });
 }
 
-setInterval(collectLiveScripts, 1000);
-setInterval(updateScripts, 1000);
+function queueUpdateScripts() {
+    if (changeTimeout !== null) {
+        clearTimeout(changeTimeout);
+    }
+
+    changeTimeout = setTimeout(function () {
+        updatePromise = updatePromise.then(function () {
+            // Remove all files from queue and update them
+            var filePaths = changeQueue.splice(0, changeQueue.length);
+            updateScripts(filePaths);
+        }).fail(function (err) {
+            console.error(err);
+            // Eat error
+        });
+    }, UPDATE_INTERVAL);
+}
+
+setInterval(function () {
+    collectLiveScripts().then(function (liveScripts_) {
+        liveScripts = liveScripts_;
+    }).end()
+}, 2000);
