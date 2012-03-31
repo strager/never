@@ -23,4 +23,3 @@ server.listen(6003, function (err) {
     console.log("3. Update helloWorldServer.js by changing the response text (\"Hello, world!\")");
     console.log("4. Reload the page in your web browser");
 });
-
