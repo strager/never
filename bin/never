@@ -20,9 +20,7 @@ var host = process.argv[4] || '';
 
 var socket = v8socket.connect(port, host);
 
-var liveScripts = Object.create(null); // script path => script ID
 var changeQueue = [ ];
-
 var changeTimeout = null;
 var updatePromise = Q.ref(null);
 
@@ -43,7 +41,7 @@ function collectLiveScripts() {
         socket.request,
         socket,
         { 'command': 'scripts' }
-    ).then(function (data) {
+    ).get(0).then(function (data) {
         var scripts = Object.create(null);
 
         data.forEach(function (scriptData) {
@@ -67,44 +65,58 @@ function collectLiveScripts() {
 }
 
 function updateScripts(filePaths) {
-    var scriptNames = filePaths.map(function (filePath) {
-        if (IS_SPACEPORT) {
-            return path.basename(filePath);
-        } else {
-            return filePath;
-        }
-    });
+    return Q.ncall(socket.pauseWith, socket, function (callback) {
+        // Debugger is paused in this function block,
+        // as to make updates atomic
 
-    return Q.all(filePaths.map(function (filePath, i) {
-        // Collect contents of each changed script
-
-        if (scriptNames[i] in liveScripts) {
-            return Q.ncall(fs.readFile, fs, filePath);
-        } else {
-            return null;
-        }
-    })).then(function (contentss) {
-        // Send changes to debugger
-
-        return Q.all(contentss.map(function (contents, i) {
-            var scriptName = scriptNames[i];
-
-            if (IS_NODE) {
-                contents = '(function (exports, require, module, __filename, __dirname) { ' + contents + '\n});';
+        collectLiveScripts().then(function (liveScripts) {
+            function readFileContents(filePath, scriptName) {
             }
 
-            return Q.ncall(socket.request, socket, {
-                'command': 'changelive',
-                'arguments': {
-                    'script_id': liveScripts[scriptName],
-                    'new_source': contents
+            function sendContentsToDebugger(scriptName, contents) {
+                if (IS_NODE) {
+                    contents = '(function (exports, require, module, __filename, __dirname) { ' + contents + '\n});';
                 }
-            });
-        }));
-    }).then(function (responses) {
-        // Profit!
 
-        return null; // Hide responses
+                return Q.ncall(socket.request, socket, {
+                    'command': 'changelive',
+                    'arguments': {
+                        'script_id': liveScripts[scriptName],
+                        'new_source': contents
+                    }
+                });
+            }
+
+            function updateScript(filePath) {
+                var scriptName = filePath;
+                if (IS_SPACEPORT) {
+                    scriptName = path.basename(filePath);
+                }
+
+                if (!(scriptName in liveScripts)) {
+                    return null;
+                }
+
+                console.log("Updating script " + filePath);
+
+                return Q.ncall(fs.readFile, fs, filePath).then(function (contents) {
+                    return sendContentsToDebugger(scriptName, contents);
+                }).fail(function (err) {
+                    // Add some debugging information to errors
+                    err.scriptName = scriptName;
+                    err.filePath = filePath;
+                    throw err;
+                });
+            }
+
+            return Q.all(filePaths.map(updateScript));
+        }).then(function (_) {
+            callback(null);
+        }, function (err) {
+            callback(err);
+        });
+
+        // end debugger stopped
     });
 }
 
@@ -117,16 +129,10 @@ function queueUpdateScripts() {
         updatePromise = updatePromise.then(function () {
             // Remove all files from queue and update them
             var filePaths = changeQueue.splice(0, changeQueue.length);
-            updateScripts(filePaths);
+            updateScripts(filePaths).end();
         }).fail(function (err) {
             console.error(err);
             // Eat error
         });
     }, UPDATE_INTERVAL);
 }
-
-setInterval(function () {
-    collectLiveScripts().then(function (liveScripts_) {
-        liveScripts = liveScripts_;
-    }).end()
-}, 2000);
